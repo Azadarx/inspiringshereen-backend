@@ -218,23 +218,27 @@ const verifyAdmin = async (req, res, next) => {
 // Update these functions in your server.js file
 
 // Update user registration - no referenceId needed
-app.post('/api/user/registrations', authenticateFirebase, async (req, res) => {
+app.post('/api/user/registrations', async (req, res) => {
     try {
-        const uid = req.user.uid;
-        const registrationData = req.body;
+        const { email, fullName, phone, timestamp } = req.body;
+        const uid = email.replace(/[^\w]/g, '_'); // or: crypto.randomUUID()
 
-        // Store user registration data
-        await db.ref(`users/${uid}/registration`).set({
-            ...registrationData,
-            timestamp: registrationData.timestamp || new Date().toISOString()
+        await registrationsRef.child(uid).set({
+            fullName,
+            email,
+            phone,
+            uid,
+            timestamp: timestamp || new Date().toISOString()
         });
+
+
 
         // Also store in global registrations collection with UID as key
-        await registrationsRef.child(uid).set({
-            ...registrationData,
-            uid,
-            timestamp: registrationData.timestamp || new Date().toISOString()
-        });
+        // await registrationsRef.child(uid).set({
+        //     ...registrationData,
+        //     uid,
+        //     timestamp: registrationData.timestamp || new Date().toISOString()
+        // });
 
         res.json({
             success: true,
@@ -252,40 +256,51 @@ app.post('/api/user/registrations', authenticateFirebase, async (req, res) => {
 // Create payment order with Razorpay - no referenceId needed
 // In server.js, update the create-payment-order endpoint with better error handling
 
-app.post('/api/create-payment-order', authenticateFirebase, async (req, res) => {
+app.post('/api/create-payment-order', async (req, res) => {
     try {
-        const uid = req.user.uid;
-        console.log('Creating payment order for user:', uid);
+        const { email, fullName, phone, timestamp } = req.body;
+        console.log('Create-payment-order payload:', req.body);
 
-        // Fetch user data to verify registration
-        const userSnapshot = await registrationsRef.child(uid).once('value');
-
-        if (!userSnapshot.exists()) {
-            console.log(`User registration data not found for user ${uid}, creating empty registration`);
-
-            // Get basic user info from Firebase Auth
-            const userRecord = await admin.auth().getUser(uid);
-
-            // Create a basic registration entry if one doesn't exist
-            const basicRegistration = {
-                fullName: userRecord.displayName || 'Unknown',
-                email: userRecord.email || '',
-                phone: '',
-                timestamp: new Date().toISOString()
-            };
-
-            // Store basic registration
-            await registrationsRef.child(uid).set(basicRegistration);
-            await db.ref(`users/${uid}/registration`).set(basicRegistration);
-
-            console.log(`Created basic registration for user ${uid}`);
+        if (!email) {
+            return res.status(400).json({ success: false, error: 'Email is required' });
         }
+        const uid = email.replace(/[^\w]/g, '_');
+
+
+        await registrationsRef.child(uid).set({
+            fullName,
+            email,
+            phone,
+            timestamp: timestamp || new Date().toISOString()
+        });
+
+
+        // if (!userSnapshot.exists()) {
+        //     console.log(`User registration data not found for user ${uid}, creating empty registration`);
+
+        //     // Get basic user info from Firebase Auth
+        //     const userRecord = await admin.auth().getUser(uid);
+
+        //     // Create a basic registration entry if one doesn't exist
+        //     const basicRegistration = {
+        //         fullName: userRecord.displayName || 'Unknown',
+        //         email: userRecord.email || '',
+        //         phone: '',
+        //         timestamp: new Date().toISOString()
+        //     };
+
+        //     // Store basic registration
+        //     await registrationsRef.child(uid).set(basicRegistration);
+        //     await db.ref(`users/${uid}/registration`).set(basicRegistration);
+
+        //     console.log(`Created basic registration for user ${uid}`);
+        // }
 
         // Proceed with payment order creation
         const amount = 9900; // ₹99 in paisa
 
         const options = {
-            amount: 9900,
+            amount: 100,
             currency: "INR",
             receipt: `rcpt_${Date.now()}`, // ✅ Short & unique
             payment_capture: 1,
@@ -308,13 +323,17 @@ app.post('/api/create-payment-order', authenticateFirebase, async (req, res) => 
             });
 
             // Also update in user-specific path
-            await db.ref(`users/${uid}/registration`).update({
+            await db.ref(`users/${uid}/registration`).set({
+                fullName,
+                email,
+                phone,
                 orderId: order.id,
                 orderAmount: amount / 100,
                 orderCurrency: "INR",
                 orderStatus: "created",
                 orderTimestamp: new Date().toISOString()
             });
+
 
             res.status(200).json({
                 success: true,
@@ -356,7 +375,7 @@ app.post('/api/create-payment-order', authenticateFirebase, async (req, res) => 
 });
 
 // Confirm payment
-app.post('/api/confirm-payment', authenticateFirebase, async (req, res) => {
+app.post('/api/confirm-payment', async (req, res) => {
     try {
         const {
             razorpay_payment_id,
@@ -364,7 +383,16 @@ app.post('/api/confirm-payment', authenticateFirebase, async (req, res) => {
             razorpay_signature
         } = req.body;
 
-        const uid = req.user.uid;
+        const { email, fullName, phone, timestamp } = req.body;
+        const uid = email.replace(/[^\w]/g, '_'); // or: crypto.randomUUID()
+
+        await registrationsRef.child(uid).set({
+            fullName,
+            email,
+            phone,
+            timestamp: timestamp || new Date().toISOString()
+        });
+
 
         if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
             return res.status(400).json({
@@ -555,48 +583,48 @@ app.post('/api/inspiringshereen-webhook', async (req, res) => {
 });
 
 // Payment check endpoint - fixed to be outside webhook handler
-app.get('/api/check-payment', authenticateFirebase, async (req, res) => {
+app.get('/api/check-payment', async (req, res) => {
     try {
-        const uid = req.user.uid;
+        const referenceId = req.query.reference_id;
 
-        // Check if payment is confirmed in Firebase
-        const confirmedSnapshot = await confirmedPaymentsRef.child(uid).once('value');
-        const isConfirmed = confirmedSnapshot.exists();
-
-        if (isConfirmed) {
-            res.json({ success: true });
-        } else {
-            // Check if registration exists
-            const registrationSnapshot = await registrationsRef.child(uid).once('value');
-
-            if (registrationSnapshot.exists()) {
-                // Check the order status
-                const registration = registrationSnapshot.val();
-                const status = registration.paymentStatus || 'PENDING';
-
-                res.json({
-                    success: false,
-                    status,
-                    message: status === 'Failed' ?
-                        'Payment failed: ' + (registration.paymentFailureReason || 'Unknown reason') :
-                        'Payment is being processed'
-                });
-            } else {
-                res.json({
-                    success: false,
-                    status: 'UNKNOWN',
-                    message: 'Registration not found'
-                });
-            }
+        if (!referenceId) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing reference_id in query parameters'
+            });
         }
+
+        // Look up user by order ID (reference ID)
+        const snapshot = await registrationsRef.orderByChild('orderId').equalTo(referenceId).once('value');
+        const registrations = snapshot.val();
+
+        if (!registrations) {
+            return res.status(404).json({
+                success: false,
+                message: 'No registration found with the given reference ID'
+            });
+        }
+
+        const uid = Object.keys(registrations)[0];
+        const userData = registrations[uid];
+
+        const isConfirmed = userData.paymentStatus === 'Confirmed';
+
+        return res.json({
+            success: isConfirmed,
+            status: userData.paymentStatus || 'PENDING',
+            userData
+        });
+
     } catch (error) {
-        console.error('Error checking payment:', error);
-        res.status(500).json({
+        console.error('Error checking payment by reference ID:', error);
+        return res.status(500).json({
             success: false,
             error: 'Server error while checking payment'
         });
     }
 });
+
 // Admin routes - secured with Firebase Auth and Admin Check
 app.get('/api/admin/registrations', authenticateFirebase, verifyAdmin, async (req, res) => {
     try {
