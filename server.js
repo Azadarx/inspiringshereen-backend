@@ -901,6 +901,174 @@ app.get('/api/health', (req, res) => {
     res.json(healthStatus);
 });
 
+// Update the contact form API endpoint in server.js
+app.post('/api/contact-us', async (req, res) => {
+    try {
+        const { name, email, subject, message } = req.body;
+
+        // Debug request body
+        console.log('Contact form request received:', req.body);
+
+        // Validate required fields
+        if (!name || !email || !subject || !message) {
+            console.log('Validation failed: Missing required fields');
+            return res.status(400).json({
+                success: false,
+                error: 'All fields are required'
+            });
+        }
+
+        // Email validation regex
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            console.log('Validation failed: Invalid email format');
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid email address'
+            });
+        }
+
+        // Make sure email configuration exists
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+            console.error('Email configuration missing', {
+                EMAIL_USER_EXISTS: !!process.env.EMAIL_USER,
+                EMAIL_PASSWORD_EXISTS: !!process.env.EMAIL_PASSWORD
+            });
+            return res.status(500).json({
+                success: false,
+                error: 'Email service not configured properly'
+            });
+        }
+
+        // Create a dedicated transporter for this request to ensure fresh connection
+        const contactTransporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASSWORD
+            },
+            debug: true, // Enable debug logs
+            logger: true // Log transport activity
+        });
+
+        // Verify the transporter connection
+        try {
+            await contactTransporter.verify();
+            console.log('SMTP connection verified successfully');
+        } catch (verifyError) {
+            console.error('SMTP connection verification failed:', verifyError);
+            return res.status(500).json({
+                success: false,
+                error: 'Could not connect to email service. Please try again later.'
+            });
+        }
+
+        // Configure email to admin
+        const adminMailOptions = {
+            from: process.env.EMAIL_USER, // Use your email as sender
+            replyTo: email, // Ensures replies go back to the sender
+            to: process.env.EMAIL_USER, // Admin email (your Gmail account)
+            subject: `Contact Form: ${subject}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+                    <h2 style="color: #7C3AED;">New Contact Form Submission</h2>
+                    <p><strong>From:</strong> ${name} (${email})</p>
+                    <p><strong>Subject:</strong> ${subject}</p>
+                    <div style="margin-top: 20px; padding: 15px; background-color: #f7f7f7; border-left: 4px solid #7C3AED;">
+                        <p><strong>Message:</strong></p>
+                        <p>${message.replace(/\n/g, '<br>')}</p>
+                    </div>
+                    <p style="margin-top: 20px; font-size: 12px; color: #666;">
+                        This message was sent from the contact form on your website.
+                    </p>
+                </div>
+            `
+        };
+
+        // Configure auto-reply email
+        const userMailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: `Thank you for contacting Inspiring Shereen`,
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+                    <h2 style="color: #7C3AED; text-align: center;">We've Received Your Message</h2>
+                    <p>Dear ${name},</p>
+                    <p>Thank you for reaching out to us. We have received your message regarding "${subject}" and will get back to you as soon as possible.</p>
+                    
+                    <div style="background-color: #F5F3FF; padding: 15px; border-radius: 10px; margin: 20px 0;">
+                        <p style="margin-top: 0;"><strong>Your message:</strong></p>
+                        <p style="font-style: italic;">${message.replace(/\n/g, '<br>')}</p>
+                    </div>
+                    
+                    <p>If you have any urgent concerns, feel free to reach out directly on WhatsApp: <a href="https://wa.me/919951611674">Click here to chat</a></p>
+                    
+                    <p style="margin-bottom: 0;">Warm regards,</p>
+                    <p style="margin-top: 5px;"><strong>Inspiring Shereen</strong></p>
+                    <p style="color: #7C3AED;">Life Coach | Shaping Lives With Holistic Success</p>
+                    
+                    <div style="text-align: center; margin-top: 20px;">
+                        <a href="https://wa.me/919951611674" style="display: inline-block; background-color: #25D366; color: white; text-decoration: none; padding: 10px 20px; border-radius: 5px; font-weight: bold;">
+                            Connect on WhatsApp
+                        </a>
+                    </div>
+                </div>
+            `
+        };
+
+        console.log('Attempting to send emails...');
+
+        // Send emails with proper error handling - send one at a time
+        try {
+            const [adminEmailResult, userEmailResult] = await Promise.all([
+                contactTransporter.sendMail(adminMailOptions),
+                contactTransporter.sendMail(userMailOptions)
+            ]);
+            console.log('Admin email sent successfully:', adminEmailResult.messageId);
+            console.log('User confirmation email sent successfully:', userEmailResult.messageId);
+
+            // Send success response
+            console.log('✅ Contact form response sent to client');
+            return res.status(200).json({
+                success: true,
+                message: 'Your message has been sent. We will contact you shortly.'
+            });
+        } catch (emailError) {
+            console.error('Failed to send email:', emailError);
+
+            // Store failed attempt in Firebase
+            try {
+                const contactData = {
+                    name,
+                    email,
+                    subject,
+                    message,
+                    timestamp: new Date().toISOString(),
+                    emailSent: false,
+                    emailError: emailError.message
+                };
+
+                await db.ref('contactFormSubmissionsFailed').push(contactData);
+                console.log('Failed contact submission stored in Firebase');
+            } catch (dbError) {
+                console.error('Additionally failed to store error in Firebase:', dbError);
+            }
+
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to send email. Please try again later.'
+            });
+        }
+    } catch (error) {
+        console.error('General error processing contact form submission:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Server error. Please try again later.'
+        });
+    }
+
+});
+
 function debugEnvironment() {
     console.log('Environment check:');
     console.log('- NODE_ENV:', process.env.NODE_ENV);
